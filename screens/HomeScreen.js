@@ -7,44 +7,55 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { SERVER_URL } from '../config';
 
-const HomeScreen = ({ navigation }) => {
+const HomeScreen = ({ userLocation, locationUpdateTrigger }) => {
   const { user, logout } = useAuth();
   const [stores, setStores] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
 
-  const handleLogout = async () => {
-    await logout();
-    navigation.replace('Login');
-  };
+ 
 
   const fetchNearbyStores = async () => {
     try {
       setLoading(true);
       setError(null);
   
-      // Get user data from AsyncStorage
-      const storedUserJson = await AsyncStorage.getItem('user');
-      if (!storedUserJson) {
-        throw new Error('User data not found');
-      }
-  
-      let storedUser = JSON.parse(storedUserJson);
-  
-      // If location not available, add default Kochi coordinates and update storage
-      if (!storedUser.latitude || !storedUser.longitude) {
-        storedUser.latitude = 9.9312;
-        storedUser.longitude = 76.2673;
+      // Use the userLocation prop if available, otherwise fall back to AsyncStorage
+      let latitude, longitude;
+      
+      if (userLocation && userLocation.latitude && userLocation.longitude) {
+        // Use the props passed from parent component
+        latitude = userLocation.latitude;
+        longitude = userLocation.longitude;
+        console.log("Using location from props:", latitude, longitude);
+      } else {
+        // Fall back to AsyncStorage if props are not available
+        const storedUserJson = await AsyncStorage.getItem('user');
+        if (!storedUserJson) {
+          throw new Error('User data not found');
+        }
+    
+        let storedUser = JSON.parse(storedUserJson);
+        
+        // If location not available, add default coordinates
+        if (!storedUser.latitude || !storedUser.longitude) {
+          storedUser.latitude = 9.9312;
+          storedUser.longitude = 76.2673;
+        }
+        
+        latitude = storedUser.latitude;
+        longitude = storedUser.longitude;
       }
   
       // Make API call to get nearby stores
       const response = await axios.get(
-        `${SERVER_URL}/stores/nearby?latitude=${storedUser.latitude}&longitude=${storedUser.longitude}`
+        `${SERVER_URL}/stores/nearby?latitude=${latitude}&longitude=${longitude}`
       );
+      console.log("stores are",response.data );
       
       // Update state with fetched stores
-      setStores(response.data);
+      setStores(response.data.stores);
     } catch (err) {
       console.error('Error fetching nearby stores:', err);
       setError(err.message || 'Failed to fetch nearby stores');
@@ -59,10 +70,12 @@ const HomeScreen = ({ navigation }) => {
     }
   };
 
-  // Fetch stores when component mounts
+  // Log when userLocation or locationUpdateTrigger changes
   useEffect(() => {
+    console.log('Location updated:', userLocation);
+    console.log('Trigger value:', locationUpdateTrigger);
     fetchNearbyStores();
-  }, []);
+  }, [userLocation, locationUpdateTrigger]);
 
   // Pull-to-refresh functionality
   const handleRefresh = () => {
@@ -71,20 +84,31 @@ const HomeScreen = ({ navigation }) => {
   };
 
   // Render each store item
-  const renderStoreItem = ({ item }) => (
-    <SellerCard
-      image={item.image || "https://images.unsplash.com/photo-1600891964599-f61ba0e24092"}
-      name={item.name}
-      rating={`${item.rating || '0'} (${item.reviewCount || '0'})`}
-      location={item.location || 'Unknown location'}
-      distance={`${item.distance?.toFixed(1) || '0'}`}
-      category={item.category || 'Uncategorized'}
-      price={item.price || '₹0'}
-      time={item.deliveryTime || 'N/A'}
-      offer={item.offer || 'No offers'}
-    />
-  );
-
+  const renderStoreItem = ({ item }) => {
+    const distanceText =
+      item.distance?.value && typeof item.distance.value === 'number'
+        ? `${item.distance.value.toFixed(1)} km`
+        : '0 km';
+  
+    const locationText =
+      item.place ||
+      (item.location?.coordinates
+        ? `${item.location.coordinates[1].toFixed(4)}, ${item.location.coordinates[0].toFixed(4)}`
+        : 'Unknown location');
+  
+    return (
+      <SellerCard
+        image={item.profileImage || "https://images.unsplash.com/photo-1600891964599-f61ba0e24092"}
+        name={item.storeName}
+        rating={`${item.rating || '0'} (${item.reviewCount || '0'})`}
+        location={locationText}
+        distance={distanceText}
+        category={item.category || 'Uncategorized'}
+        price={item.price || '₹0'}
+      />
+    );
+  };
+  
   return (
     <View style={styles.container}>
       {loading && !refreshing ? (

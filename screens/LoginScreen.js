@@ -37,8 +37,7 @@ const LoginScreen = ({ navigation }) => {
         type: 'success',
         text1: 'Login Successful!',
       });
-      navigation.replace('Home');  // replaces stack, can't go back to login
-    } else {
+        } else {
       Toast.show({
         type: 'error',
         text1: 'Login Failed',

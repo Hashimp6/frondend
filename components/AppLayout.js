@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -6,11 +6,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // Import your screen components
 import HomeScreen from '../screens/HomeScreen';
 import LocationSelectionModal from './LocationSelection';
+import ProfileScreen from './ProfileScreen';
 
 const AppLayout = () => {
   const [activeTab, setActiveTab] = useState('Home');
   const [locationModalVisible, setLocationModalVisible] = useState(false);
   const [user, setUser] = useState(null);
+  const [locationUpdateTrigger, setLocationUpdateTrigger] = useState(0);
   
   // Check for user location on component mount
   useEffect(() => {
@@ -42,12 +44,19 @@ const AppLayout = () => {
   }, []);
 
   // Function to handle location modal close and update
-  const handleLocationUpdate = (updatedUser) => {
+  const handleLocationUpdate = useCallback(async (updatedUser) => {
     if (updatedUser) {
+      // This was missing: Save the updated user to AsyncStorage first
+      await AsyncStorage.setItem('user', JSON.stringify(updatedUser));
+      
+      // Then update state
       setUser(updatedUser);
+      
+      // Increment the update trigger to force HomeScreen to refresh
+      setLocationUpdateTrigger(prev => prev + 1);
     }
     setLocationModalVisible(false);
-  };
+  }, []);
 
   // Function to open location modal manually
   const openLocationModal = () => {
@@ -58,13 +67,32 @@ const AppLayout = () => {
   const renderContent = () => {
     switch (activeTab) {
       case 'Home':
-        return <HomeScreen />;
+        return (
+          <HomeScreen 
+            userLocation={user ? {
+              latitude: user.latitude,
+              longitude: user.longitude,
+              locationName: user.locationName || 'Selected Location'
+            } : null}
+            locationUpdateTrigger={locationUpdateTrigger}
+          />
+        );
       // case 'Search':
       //   return <SearchScreen />;
-      // case 'Profile':
-      //   return <ProfileScreen />;
+      case 'Profile':
+        return <ProfileScreen />;
+      
       default:
-        return <HomeScreen />;
+        return (
+          <HomeScreen 
+            userLocation={user ? {
+              latitude: user.latitude,
+              longitude: user.longitude,
+              locationName: user.locationName || 'Selected Location'
+            } : null}
+            locationUpdateTrigger={locationUpdateTrigger}
+          />
+        );
     }
   };
 
@@ -75,9 +103,16 @@ const AppLayout = () => {
         <Text style={styles.appName}>Bizz</Text>
 
         <View style={styles.iconContainer}>
-          {/* Location Icon */}
-          <TouchableOpacity style={styles.iconButton} onPress={openLocationModal}>
-            <Ionicons name="location-outline" size={24} color="#333" />
+          {/* Location Icon with current location name */}
+          <TouchableOpacity 
+            style={styles.locationButton} 
+            onPress={openLocationModal}
+          >
+            <Ionicons name="location-outline" size={20} color="#333" />
+            <Text style={styles.locationText} numberOfLines={1}>
+              {user?.locationName || 'Set location'}
+            </Text>
+            <Ionicons name="chevron-down" size={16} color="#666" />
           </TouchableOpacity>
 
           {/* Modern Message Icon (Chat Bubble) */}
@@ -162,12 +197,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
-  
+  locationButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f5f5f5',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 16,
+  },
+  locationText: {
+    fontSize: 13,
+    marginHorizontal: 4,
+    maxWidth: 100,
+  },
   iconButton: {
     marginLeft: 15,
     position: 'relative',
   },
-  
   appName: {
     fontSize: 20,
     fontWeight: 'bold',

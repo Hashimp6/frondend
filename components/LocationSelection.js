@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -9,16 +9,18 @@ import {
   FlatList,
   ActivityIndicator,
   KeyboardAvoidingView,
-  Platform
+  Platform,
+  Alert
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import axios from 'axios';
 import { SERVER_URL } from '../config';
+import Constants from 'expo-constants';
 
-
-const GOOGLE_MAPS_API_KEY = 'AIzaSyAWdpzsOIeDYSG76s3OncbRHmm5pBwiG24';
+// Get API key from environment variables
+const GOOGLE_MAPS_API_KEY = Constants.expoConfig?.extra?.googleMapsApiKey;
 
 const LocationSelectionModal = ({ visible, onClose }) => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -26,10 +28,20 @@ const LocationSelectionModal = ({ visible, onClose }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  // Function to get location suggestions from Google Places API
-  const fetchLocationSuggestions = async (query) => {
+  // Clear error when search query changes
+  useEffect(() => {
+    if (error) setError(null);
+  }, [searchQuery]);
+
+  // Function to get location suggestions - using useCallback for better performance
+  const fetchLocationSuggestions = useCallback(async (query) => {
     if (!query.trim()) {
       setSuggestions([]);
+      return;
+    }
+
+    if (!GOOGLE_MAPS_API_KEY) {
+      setError('Google Maps API key is missing');
       return;
     }
 
@@ -45,19 +57,23 @@ const LocationSelectionModal = ({ visible, onClose }) => {
       
       if (data.status === 'OK') {
         setSuggestions(data.predictions);
+      } else if (data.status === 'ZERO_RESULTS') {
+        setSuggestions([]);
       } else {
-        setError('Failed to get location suggestions');
+        console.error('Google Places API error:', data.status, data.error_message);
+        setError(`Location search failed: ${data.status}`);
         setSuggestions([]);
       }
     } catch (err) {
-      setError('Network error occurred');
+      console.error('Location suggestion error:', err);
+      setError('Network error occurred. Please try again.');
       setSuggestions([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, [GOOGLE_MAPS_API_KEY]);
 
-  // Debounce search to avoid too many API calls
+  // Better debounce implementation
   useEffect(() => {
     const timeoutId = setTimeout(() => {
       if (searchQuery.length > 2) {
@@ -68,10 +84,15 @@ const LocationSelectionModal = ({ visible, onClose }) => {
     }, 500);
 
     return () => clearTimeout(timeoutId);
-  }, [searchQuery]);
+  }, [searchQuery, fetchLocationSuggestions]);
 
-  // Get coordinates from place_id
+  // Get coordinates from place_id with better error handling
   const getCoordinatesFromPlaceId = async (placeId) => {
+    if (!GOOGLE_MAPS_API_KEY) {
+      setError('Google Maps API key is missing');
+      return null;
+    }
+
     try {
       const response = await fetch(
         `https://maps.googleapis.com/maps/api/place/details/json?place_id=${placeId}&fields=geometry&key=${GOOGLE_MAPS_API_KEY}`
@@ -79,81 +100,114 @@ const LocationSelectionModal = ({ visible, onClose }) => {
       
       const data = await response.json();
       
-      if (data.status === 'OK' && data.result && data.result.geometry && data.result.geometry.location) {
+      if (data.status === 'OK' && data.result?.geometry?.location) {
         return {
           latitude: data.result.geometry.location.lat,
           longitude: data.result.geometry.location.lng
         };
       }
-      throw new Error('Could not get coordinates');
+      throw new Error(`Could not get coordinates: ${data.status || 'Unknown error'}`);
     } catch (err) {
-      setError('Failed to get location coordinates');
+      console.error('Get coordinates error:', err);
+      setError('Failed to get location coordinates. Please try again.');
       return null;
     }
   };
 
-  // Handle location selection
-  const handleSelectLocation = async (item) => {
+  // Update user location with better error handling
+  const updateUserLocation = async (userData, coordinates, locationName) => {
     try {
-      setLoading(true);
+      // Create updated user object
+      const updatedUser = {
+        ...userData,
+        latitude: coordinates.latitude,
+        longitude: coordinates.longitude,
+        locationName: locationName
+      };
       
-      // Get coordinates for the selected place
-      const coordinates = await getCoordinatesFromPlaceId(item.place_id);
+      // Update local storage with new location data
+      await AsyncStorage.setItem('user', JSON.stringify(updatedUser));
       
-      if (coordinates) {
-        // Get the stored user data
-        const storedUserJson = await AsyncStorage.getItem('user');
-        let storedUser = storedUserJson ? JSON.parse(storedUserJson) : {};
-        
-        // Update user with new coordinates and location name
-        const updatedUser = {
-          ...storedUser,
-          latitude: coordinates.latitude,
-          longitude: coordinates.longitude,
-          locationName: item.description
-        };
-        
+      // Try to update server if we have userId and token
+      if (userData._id && userData.token) {
         try {
-          // ✅ Send location update to backend
-          const userId=storedUser._id
-          await axios.put(`${SERVER_URL}/users/location/${userId}`, {
+          await axios.put(`${SERVER_URL}/users/location/${userData._id}`, {
             coordinates: [coordinates.longitude, coordinates.latitude], // GeoJSON format
           }, {
             headers: {
               'Content-Type': 'application/json',
-              Authorization: `Bearer ${storedUser.token}`, // only if using auth
+              Authorization: `Bearer ${userData.token}`,
             },
           });
-      
-          // Save updated user data locally
-          await AsyncStorage.setItem('user', JSON.stringify(updatedUser));
-          
-        } catch (apiError) {
-          console.error("Failed to update location on server:", apiError);
-          setError('Failed to update location on server');
+        } catch (serverErr) {
+          console.error('Server update failed, but continuing with local update:', serverErr);
+          // We'll continue even if server update fails
         }
+      }
+      
+      return updatedUser;
+    } catch (err) {
+      console.error('Update user location error:', err);
+      throw new Error('Failed to update location');
+    }
+  };
+
+  // Handle location selection with improved error handling
+  const handleSelectLocation = async (item) => {
+    try {
+      setLoading(true);
+      setError(null);
+      
+      // Get coordinates for the selected place
+      const coordinates = await getCoordinatesFromPlaceId(item.place_id);
+      if (!coordinates) {
+        setLoading(false);
+        return;
+      }
+      
+      // Get the stored user data
+      const storedUserJson = await AsyncStorage.getItem('user');
+      if (!storedUserJson) {
+        setError('User data not found');
+        setLoading(false);
+        return;
+      }
+      
+      const storedUser = JSON.parse(storedUserJson);
+      
+      try {
+        // Update user location
+        const updatedUser = await updateUserLocation(
+          storedUser, 
+          coordinates, 
+          item.description
+        );
         
         // Close the modal and pass back the selected location data
         onClose(updatedUser);
+      } catch (updateError) {
+        setError(updateError.message);
+        setLoading(false);
       }
     } catch (err) {
-      setError('Failed to save location');
-      setLoading(false);
-    } finally {
+      console.error('Select location error:', err);
+      setError('Failed to save location. Please try again.');
       setLoading(false);
     }
   };
 
-  // Handle getting current location
+  // Handle getting current location with improved error handling
   const handleGetCurrentLocation = async () => {
     try {
       setLoading(true);
+      setError(null);
       
       // Request location permissions
       const { status } = await Location.requestForegroundPermissionsAsync();
       
       if (status !== 'granted') {
-        setError('Permission to access location was denied');
+        setError('Location permission denied. Please enable location services.');
+        setLoading(false);
         return;
       }
       
@@ -181,40 +235,34 @@ const LocationSelectionModal = ({ visible, onClose }) => {
       
       // Get the stored user data
       const storedUserJson = await AsyncStorage.getItem('user');
-      let storedUser = storedUserJson ? JSON.parse(storedUserJson) : {};
-      
-      // Update user with new coordinates and location name
-      const updatedUser = {
-        ...storedUser,
-        latitude: location.coords.latitude,
-        longitude: location.coords.longitude,
-        locationName
-      };
-      
-      try {
-        // Send location update to backend
-        await axios.put(`${SERVER_URL}/users/location/${storedUser._id}`, {
-          coordinates: [location.coords.longitude, location.coords.latitude], // GeoJSON format
-        }, {
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${storedUser.token}`, // only if using auth
-          },
-        });
-        
-        // Save updated user data back to AsyncStorage
-        await AsyncStorage.setItem('user', JSON.stringify(updatedUser));
-        
-      } catch (apiError) {
-        console.error("Failed to update location on server:", apiError);
-        setError('Failed to update location on server');
+      if (!storedUserJson) {
+        setError('User data not found');
+        setLoading(false);
+        return;
       }
       
-      // Close the modal and pass back the selected location data
-      onClose(updatedUser);
+      const storedUser = JSON.parse(storedUserJson);
+      
+      try {
+        // Update user location
+        const updatedUser = await updateUserLocation(
+          storedUser,
+          {
+            latitude: location.coords.latitude,
+            longitude: location.coords.longitude
+          },
+          locationName
+        );
+        
+        // Close the modal and pass back the selected location data
+        onClose(updatedUser);
+      } catch (updateError) {
+        setError(updateError.message);
+        setLoading(false);
+      }
     } catch (err) {
-      setError('Failed to get current location');
-    } finally {
+      console.error('Get current location error:', err);
+      setError('Failed to get current location. Please try again.');
       setLoading(false);
     }
   };
@@ -223,9 +271,10 @@ const LocationSelectionModal = ({ visible, onClose }) => {
     <TouchableOpacity
       style={styles.suggestionItem}
       onPress={() => handleSelectLocation(item)}
+      activeOpacity={0.7}
     >
       <Ionicons name="location-outline" size={20} color="#555" style={styles.locationIcon} />
-      <Text style={styles.suggestionText}>{item.description}</Text>
+      <Text style={styles.suggestionText} numberOfLines={2}>{item.description}</Text>
     </TouchableOpacity>
   );
 
@@ -234,7 +283,7 @@ const LocationSelectionModal = ({ visible, onClose }) => {
       visible={visible}
       animationType="slide"
       transparent={true}
-      onRequestClose={onClose}
+      onRequestClose={() => onClose()}
     >
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -252,7 +301,12 @@ const LocationSelectionModal = ({ visible, onClose }) => {
             Please select your location to see nearest stores
           </Text>
           
-          {error && <Text style={styles.errorText}>{error}</Text>}
+          {error && (
+            <View style={styles.errorContainer}>
+              <Ionicons name="alert-circle" size={16} color="#FF3B30" />
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          )}
           
           <View style={styles.searchContainer}>
             <Ionicons name="search" size={20} color="#666" style={styles.searchIcon} />
@@ -262,6 +316,7 @@ const LocationSelectionModal = ({ visible, onClose }) => {
               value={searchQuery}
               onChangeText={setSearchQuery}
               autoFocus
+              placeholderTextColor="#999"
             />
             {searchQuery.length > 0 && (
               <TouchableOpacity onPress={() => setSearchQuery('')} style={styles.clearButton}>
@@ -273,6 +328,7 @@ const LocationSelectionModal = ({ visible, onClose }) => {
           <TouchableOpacity 
             style={styles.currentLocationButton}
             onPress={handleGetCurrentLocation}
+            activeOpacity={0.7}
           >
             <Ionicons name="locate" size={18} color="#007AFF" />
             <Text style={styles.currentLocationText}>Use my current location</Text>
@@ -280,15 +336,23 @@ const LocationSelectionModal = ({ visible, onClose }) => {
           
           {loading ? (
             <ActivityIndicator style={styles.loader} size="large" color="#007AFF" />
-          ) : (
+          ) : suggestions.length > 0 ? (
             <FlatList
               data={suggestions}
               renderItem={renderSuggestionItem}
               keyExtractor={(item) => item.place_id}
               style={styles.suggestionsList}
               keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={true}
+              initialNumToRender={10}
+              maxToRenderPerBatch={15}
+              windowSize={10}
             />
-          )}
+          ) : searchQuery.length > 2 && !loading ? (
+            <View style={styles.noResultsContainer}>
+              <Text style={styles.noResultsText}>No results found</Text>
+            </View>
+          ) : null}
         </View>
       </KeyboardAvoidingView>
     </Modal>
@@ -344,6 +408,7 @@ const styles = StyleSheet.create({
     flex: 1,
     height: 44,
     fontSize: 16,
+    color: '#333',
   },
   clearButton: {
     padding: 4,
@@ -379,12 +444,30 @@ const styles = StyleSheet.create({
     color: '#333',
     flex: 1,
   },
+  errorContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFEBEB',
+    padding: 10,
+    borderRadius: 8,
+    marginBottom: 12,
+  },
   errorText: {
     color: '#FF3B30',
-    marginBottom: 12,
+    marginLeft: 6,
+    fontSize: 14,
+    flex: 1,
   },
   loader: {
     marginVertical: 20,
+  },
+  noResultsContainer: {
+    padding: 20,
+    alignItems: 'center',
+  },
+  noResultsText: {
+    color: '#666',
+    fontSize: 15,
   },
 });
 
